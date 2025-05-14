@@ -7,68 +7,105 @@ from moomoo import OpenQuoteContext
 
 # parameters
 step = 0.01
-limit = 0.2
+limit = 1
 
-def SAR(df_original, s, l):
-    df = df_original.copy()
 
-    signals = np.zeros(len(df))
-    sar = np.zeros(len(df))
+short_ema = 10
+long_ema = 20
+threshold = 0
+
+def calculate_atr(data, window=14):
+    # Calculate True Range (TR)
+    previous_close = data['close'].iloc[0]
     
-    high = df['high'].values
-    low = df['low'].values
-    close = df['close'].values
+    data['high_low'] = data['high'] - data['low']
+    data['high_close'] = abs(data['high'] - previous_close)
+    data['low_close'] = abs(data['low'] - previous_close)
+    
+    # True Range (TR) is the maximum of the 3 values
+    data['true_range'] = data[['high_low', 'high_close', 'low_close']].max(axis=1)
+    
+    # ATR is the moving average of True Range
+    data['atr'] = data['true_range'].rolling(window=window).mean()
+    
+    # Drop intermediate columns
+    data.drop(columns=['high_low', 'high_close', 'low_close'], inplace=True)
+    
+    return data
 
-    trend = 1  # 1 for uptrend, -1 for downtrend
-    accel = s
-    ep = low[0]  # Extreme Point
-    sar[0] = high[0]  # Initial SAR
+def SAR(data, step=0.02, limit=0.2, threshold=0.2):
+    
 
-    for i in range(1, len(df)):
+    trend = 1  # 1 = uptrend, -1 = downtrend
+    af = step
+    ep = data['high'].iloc[0]
+    
+    # Initialize SAR list
+    sar = [0.0] * len(data)
+    sar[1] = data['low'].iloc[0]
+    
+    # Initialize columns
+    signals = [0] * len(data)
+
+    
+
+
+    for i in range(2, len(data)):
+        prev_sar = sar[i - 1]
+
         if trend == 1:  # Uptrend
-            sar[i] = sar[i-1] + accel * (ep - sar[i-1])
-            # Constraint
-            previous_low = low[i - 1]
-            second_previous_low = low[i - 1]
-            if i >= 2:
-                second_previous_low = low[i - 2]
-            sar[i] = max(sar[i], previous_low, second_previous_low)
-            
-            # Reversal check
-            if close[i] < sar[i]:
-                signals[i] = -1 # Sell signal
-                trend = -1
-                sar[i] = ep  # Set SAR to EP (highest high of uptrend)
-                ep = low[i]  # New EP for downtrend
-                accel = s
-            else:
-                # Update EP and accel
-                if high[i] > ep:
-                    ep = high[i]
-                    accel = min(accel + s, l)
-        else:  # Downtrend
-            sar[i] = sar[i-1] - accel * (ep - sar[i-1])
-            # Constraint
+            sar[i] = prev_sar + af * (ep - prev_sar)
+            # Enforce SAR cannot be above prior 2 lows
+            sar[i] = min(sar[i], data['low'].iloc[i - 1], data['low'].iloc[i - 2])
 
-            previous_high = high[i - 1]
-            second_previous_high = high[i - 1]
-            if i >= 2:
-                second_previous_high = high[i - 2]
-            sar[i] = min(sar[i], previous_high, second_previous_high)
-            # Reversal check
-            if close[i] >= sar[i]:
-                signals[i] = 1  # buy signal
+            # Reversal condition
+            if sar[i] + threshold >= data['low'].iloc[i]:
+                trend = -1
+                sar[i] = ep
+                ep = data['low'].iloc[i]
+                af = step
+                signals[i] = -1
+                continue
+
+            # Update EP and AF if a new high is made
+            if data['high'].iloc[i] > ep:
+                ep = data['high'].iloc[i]
+                af = min(af + step, limit)
+
+        else:  # Downtrend
+            sar[i] = prev_sar - af * (prev_sar - ep)
+            # Enforce SAR cannot be below prior 2 highs
+            sar[i] = max(sar[i], data['high'].iloc[i - 1], data['high'].iloc[i - 2])
+
+            # Reversal condition
+            if sar[i] - threshold <= data['high'].iloc[i]:
                 trend = 1
-                sar[i] = ep  # Set SAR to EP (lowest low of downtrend)
-                ep = high[i]  # New EP for uptrend
-                accel = s
-            else:
-                # Update EP and accel
-                if low[i] < ep:
-                    ep = low[i]
-                    accel = min(accel + s, l)
-    df_original['signals'] = signals
-    return 0
+                sar[i] = ep
+                ep = data['high'].iloc[i]
+                af = step
+                signals[i] = 1
+                continue
+
+            # Update EP and AF if a new low is made
+            if data['low'].iloc[i] < ep:
+                ep = data['low'].iloc[i]
+                af = min(af + step, limit)
+    data['signals'] = signals
+    return data
+
+
+    
+    
+            
+
+
+
+            
+
+                
+
+
+
 
 def main():
     quote_ctx = OpenQuoteContext(host='127.0.0.1', port=11111)
@@ -84,7 +121,7 @@ def main():
             symbol,
             start=start_date,
             end=end_date,
-            ktype='K_60M',
+            ktype='K_30M',
             autype='qfq',
             max_count=1000,
             page_req_key=page_req_key
@@ -105,8 +142,7 @@ def main():
     all_data['time_key'] = pd.to_datetime(all_data['time_key'])
     all_data.set_index('time_key', inplace=True)
 
-    SAR(all_data, step, limit)
-
+    SAR(all_data, step, limit, threshold)
     # Create buy/sell signal series for plotting
     buy_signals = all_data['signals'].copy()
     sell_signals = all_data['signals'].copy()
@@ -122,6 +158,7 @@ def main():
     buy_plot = buy_signals * buy_marker_prices  # NaN where no buy signal
     sell_plot = sell_signals * sell_marker_prices  # NaN where no sell signal
 
+
     apdict = [
     # Buy signals: green upward arrows
     mpf.make_addplot(buy_plot, type='scatter', markersize=100, marker='^', color='green'),
@@ -129,10 +166,7 @@ def main():
     mpf.make_addplot(sell_plot, type='scatter', markersize=100, marker='v', color='red'),
     ]
 
-
-
-
-    # Plot with mplfinance
+            # Plot with mplfinance
     mpf.plot(all_data,
             type='candle',
             style='yahoo',
@@ -140,6 +174,6 @@ def main():
             ylabel='Price',
             figsize=(8,4),
             addplot=apdict)
-    
+
 if __name__ == "__main__":
     main()
