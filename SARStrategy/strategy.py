@@ -1,110 +1,71 @@
 import pandas as pd
 import numpy as np
 import mplfinance as mpf
-from mplfinance.plotting import make_addplot
 from datetime import datetime
 from moomoo import OpenQuoteContext
 
-# parameters
-step = 0.01
-limit = 1
+# Parameters
+STEP = 0.05
+LIMIT = 0.1
+THRESHOLD = 0.1
+SMA_PERIOD = 14
+SMA_THRESHOLD = 7
 
 
-short_ema = 10
-long_ema = 20
-threshold = 0
+def SMA(data, period, window=7, distance=1):
+    data['short_sma'] = data['close'].rolling(window=period).mean()
+    data['long_sma'] = data['close'].rolling(window=period * 2).mean()
+    data['delta'] = data['short_sma'] - data['long_sma']
 
-def calculate_atr(data, window=14):
-    # Calculate True Range (TR)
-    previous_close = data['close'].iloc[0]
-    
-    data['high_low'] = data['high'] - data['low']
-    data['high_close'] = abs(data['high'] - previous_close)
-    data['low_close'] = abs(data['low'] - previous_close)
-    
-    # True Range (TR) is the maximum of the 3 values
-    data['true_range'] = data[['high_low', 'high_close', 'low_close']].max(axis=1)
-    
-    # ATR is the moving average of True Range
-    data['atr'] = data['true_range'].rolling(window=window).mean()
-    
-    # Drop intermediate columns
-    data.drop(columns=['high_low', 'high_close', 'low_close'], inplace=True)
-    
-    return data
 
 def SAR(data, step=0.02, limit=0.2, threshold=0.2):
-    
-
     trend = 1  # 1 = uptrend, -1 = downtrend
     af = step
     ep = data['high'].iloc[0]
-    
-    # Initialize SAR list
-    sar = [0.0] * len(data)
+
+    sar = [np.nan] * len(data)
     sar[1] = data['low'].iloc[0]
-    
-    # Initialize columns
+
     signals = [0] * len(data)
-
-    
-
+    trend_list = [np.nan] * len(data)
+    trend_list[1] = trend
 
     for i in range(2, len(data)):
         prev_sar = sar[i - 1]
 
-        if trend == 1:  # Uptrend
+        if trend == 1:
             sar[i] = prev_sar + af * (ep - prev_sar)
-            # Enforce SAR cannot be above prior 2 lows
             sar[i] = min(sar[i], data['low'].iloc[i - 1], data['low'].iloc[i - 2])
-
-            # Reversal condition
-            if sar[i] + threshold >= data['low'].iloc[i]:
+            if sar[i] + threshold >= data['open'].iloc[i]:
                 trend = -1
                 sar[i] = ep
-                ep = data['low'].iloc[i]
+                ep = data['open'].iloc[i]
                 af = step
                 signals[i] = -1
-                continue
-
-            # Update EP and AF if a new high is made
-            if data['high'].iloc[i] > ep:
-                ep = data['high'].iloc[i]
-                af = min(af + step, limit)
-
-        else:  # Downtrend
+            else:
+                if data['open'].iloc[i] > ep:
+                    ep = data['high'].iloc[i]
+                    af = min(af + step, limit)
+        else:
             sar[i] = prev_sar - af * (prev_sar - ep)
-            # Enforce SAR cannot be below prior 2 highs
             sar[i] = max(sar[i], data['high'].iloc[i - 1], data['high'].iloc[i - 2])
-
-            # Reversal condition
-            if sar[i] - threshold <= data['high'].iloc[i]:
+            if sar[i] - threshold <= data['open'].iloc[i]:
                 trend = 1
                 sar[i] = ep
-                ep = data['high'].iloc[i]
+                ep = data['open'].iloc[i]
                 af = step
                 signals[i] = 1
-                continue
+            else:
+                if data['open'].iloc[i] < ep:
+                    ep = data['open'].iloc[i]
+                    af = min(af + step, limit)
 
-            # Update EP and AF if a new low is made
-            if data['low'].iloc[i] < ep:
-                ep = data['low'].iloc[i]
-                af = min(af + step, limit)
+        trend_list[i] = trend
+
     data['signals'] = signals
+    data['sar'] = sar
+    data['trend'] = trend_list
     return data
-
-
-    
-    
-            
-
-
-
-            
-
-                
-
-
 
 
 def main():
@@ -138,42 +99,51 @@ def main():
 
     quote_ctx.close()
 
-    # Prepare data for plot
     all_data['time_key'] = pd.to_datetime(all_data['time_key'])
     all_data.set_index('time_key', inplace=True)
 
-    SAR(all_data, step, limit, threshold)
-    # Create buy/sell signal series for plotting
+    all_data = SAR(all_data, STEP, LIMIT, THRESHOLD)
+    SMA(all_data, SMA_PERIOD, 7, SMA_THRESHOLD)
+
+    # Clean invalid rows before plotting
+    all_data = all_data[~all_data.isin(["", None]).any(axis=1)]
+    all_data.dropna(subset=['sar', 'short_sma', 'long_sma'], inplace=True)
+
+    # Fix 0.0 SAR placeholder
+    all_data['sar'] = all_data['sar'].replace(0.0, np.nan)
+
+    # Buy/sell signals
     buy_signals = all_data['signals'].copy()
     sell_signals = all_data['signals'].copy()
-
-    # Keep only signal locations
     buy_signals[buy_signals != 1] = np.nan
     sell_signals[sell_signals != -1] = np.nan
+    buy_plot = buy_signals * all_data['low'] * 0.9995
+    sell_plot = sell_signals * all_data['high'] * -1.0005
 
-    buy_marker_prices = all_data['low'] * 0.9995  # 0.5% below low for buy arrows
-    sell_marker_prices = all_data['high'] * -1.0005  # 0.5% above high for sell arrows
+    # Separate SAR dots by trend
+    uptrend_sar = all_data.apply(lambda row: row['sar'] if row['trend'] == 1 else np.nan, axis=1)
+    downtrend_sar = all_data.apply(lambda row: row['sar'] if row['trend'] == -1 else np.nan, axis=1)
 
-    # Combine signals with marker prices
-    buy_plot = buy_signals * buy_marker_prices  # NaN where no buy signal
-    sell_plot = sell_signals * sell_marker_prices  # NaN where no sell signal
-
+    # Save for inspection
+    all_data.to_csv("sar_sma.csv", index=False)
 
     apdict = [
-    # Buy signals: green upward arrows
-    mpf.make_addplot(buy_plot, type='scatter', markersize=100, marker='^', color='green'),
-    # Sell signals: red downward arrows
-    mpf.make_addplot(sell_plot, type='scatter', markersize=100, marker='v', color='red'),
+        mpf.make_addplot(buy_plot, type='scatter', markersize=100, marker='^', color='green'),
+        mpf.make_addplot(sell_plot, type='scatter', markersize=100, marker='v', color='red'),
+        mpf.make_addplot(uptrend_sar, type='scatter', markersize=20, marker='.', color='green'),
+        mpf.make_addplot(downtrend_sar, type='scatter', markersize=20, marker='.', color='red'),
+        mpf.make_addplot(all_data['short_sma'], color='blue', width=1.2, label='Short SMA'),
+        mpf.make_addplot(all_data['long_sma'], color='orange', width=1.2, label='Long SMA'),
     ]
 
-            # Plot with mplfinance
     mpf.plot(all_data,
-            type='candle',
-            style='yahoo',
-            title='Signals',
-            ylabel='Price',
-            figsize=(8,4),
-            addplot=apdict)
+             type='candle',
+             style='yahoo',
+             title='SAR + SMA Signals',
+             ylabel='Price',
+             figsize=(10, 5),
+             addplot=apdict)
+
 
 if __name__ == "__main__":
     main()
